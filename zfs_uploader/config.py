@@ -81,7 +81,8 @@ class Config:
                                        default.get('storage_class')),
                         max_multipart_parts=(
                                 v.getint('max_multipart_parts') or
-                                default.getint('max_multipart_parts'))
+                                default.getint('max_multipart_parts')),
+                        retention_policy=_create_retention_policy(v, default)
                     )
                 )
 
@@ -94,3 +95,51 @@ def _create_cron_dict(cron):
             'day': values[2],
             'month': values[3],
             'day_of_week': values[4]}
+
+
+def _create_retention_policy(section, default):
+    retention_policy = _parse_retention_block(default.get('retention'))
+    retention_policy.update(_parse_retention_block(section.get('retention')))
+
+    for period in ('daily', 'weekly', 'monthly', 'yearly'):
+        value = _get_retention_value(section, default, period)
+        if value is not None:
+            retention_policy[period] = value
+
+    return retention_policy or None
+
+
+def _parse_retention_block(retention):
+    retention_policy = {}
+
+    if retention is None:
+        return retention_policy
+
+    for line in retention.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        if ':' in line:
+            period, value = line.split(':', 1)
+        elif '=' in line:
+            period, value = line.split('=', 1)
+        else:
+            continue
+
+        period = period.strip()
+        if period in ('daily', 'weekly', 'monthly', 'yearly'):
+            retention_policy[period] = int(value.strip())
+
+    return retention_policy
+
+
+def _get_retention_value(section, default, period):
+    for key in (f'retention_{period}', period):
+        value = section.get(key)
+        if value is None:
+            value = default.get(key)
+        if value is not None:
+            return int(value)
+
+    return None

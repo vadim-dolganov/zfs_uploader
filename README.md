@@ -77,9 +77,23 @@ jobs can be set in one file.
 #### max_snapshots : int, optional
    Maximum number of snapshots.
 #### max_backups : int, optional
-   Maximum number of full and incremental backups.
+   Maximum number of full and incremental backups. Used when retention
+   periods are not configured. If any retention period is configured, the
+   retention policy takes precedence over max_backups.
 #### max_incremental_backups_per_full : int, optional
    Maximum number of incremental backups per full backup.
+#### retention_daily : int, optional
+   Number of daily backups to keep in S3. The latest backup in each day is
+   retained. A value of 0 disables daily retention.
+#### retention_weekly : int, optional
+   Number of weekly backups to keep in S3. The latest backup in each ISO week
+   is retained. A value of 0 disables weekly retention.
+#### retention_monthly : int, optional
+   Number of monthly backups to keep in S3. The latest backup in each month is
+   retained. A value of 0 disables monthly retention.
+#### retention_yearly : int, optional
+   Number of yearly backups to keep in S3. The latest backup in each year is
+   retained. A value of 0 disables yearly retention.
 #### storage_class : str, default: STANDARD
    S3 storage class.
 #### max_multipart_parts : int, default: 10000
@@ -105,6 +119,35 @@ max_backups = 7
 Filesystem is backed up at 02:00 daily. Only the most recent 7 snapshots
 are kept. The oldest backup without dependents is removed once there are
 more than 7 backups.
+
+#### Retention based S3 rotation
+```ini
+[DEFAULT]
+bucket_name = BUCKET_NAME
+region = us-east-1
+access_key = ACCESS_KEY
+secret_key = SECRET_KEY
+storage_class = STANDARD
+
+[pool/filesystem]
+cron = 0 2 * * *
+max_snapshots = 7
+max_incremental_backups_per_full = 6
+retention:
+  daily: 14
+  weekly: 8
+  monthly: 12
+  yearly: 5
+```
+
+The latest backup in each day, ISO week, month, and year is retained according
+to the configured limits. A single S3 object can satisfy multiple retention
+periods. For example, the latest backup of a month may also count as the latest
+backup of the day and week. Incremental backup dependencies are preserved so
+that a retained incremental backup does not lose its required full backup.
+The same values can also be configured as flat INI keys:
+`retention_daily`, `retention_weekly`, `retention_monthly`, and
+`retention_yearly`.
 
 #### Backblaze B2 S3-compatible endpoint, full backups
 ```ini

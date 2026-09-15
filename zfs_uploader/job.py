@@ -19,6 +19,7 @@ from zfs_uploader.zfs import (destroy_filesystem, destroy_snapshot,
 KB = 1024
 MB = KB * KB
 S3_MAX_CONCURRENCY = 20
+RETENTION_PERIODS = ('daily', 'weekly', 'monthly', 'yearly')
 
 
 class BackupError(Exception):
@@ -102,6 +103,11 @@ class ZFSjob:
         return self._max_multipart_parts
 
     @property
+    def retention_policy(self):
+        """ Backup retention policy. """
+        return self._retention_policy
+
+    @property
     def backup_db(self):
         """ BackupDB """
         return self._backup_db
@@ -114,7 +120,8 @@ class ZFSjob:
     def __init__(self, bucket_name, access_key, secret_key, filesystem,
                  prefix=None, region=None, cron=None, max_snapshots=None,
                  max_backups=None, max_incremental_backups_per_full=None,
-                 storage_class=None, endpoint=None, max_multipart_parts=None):
+                 storage_class=None, endpoint=None, max_multipart_parts=None,
+                 retention_policy=None):
         """ Create ZFSjob object.
 
         Parameters
@@ -145,6 +152,8 @@ class ZFSjob:
             S3 storage class.
         max_multipart_parts : int, default: 10000
             Maximum number of parts to use in a multipart S3 upload.
+        retention_policy : dict, optional
+            Number of backups to keep per retention period.
 
         """
         self._bucket_name = bucket_name
@@ -170,6 +179,7 @@ class ZFSjob:
         self._max_incremental_backups_per_full = max_incremental_backups_per_full # noqa
         self._storage_class = storage_class or 'STANDARD'
         self._max_multipart_parts = max_multipart_parts or 10000
+        self._retention_policy = _normalize_retention_policy(retention_policy)
         self._logger = logging.getLogger(__name__)
 
         if max_snapshots and not max_snapshots >= 0:
@@ -225,7 +235,9 @@ class ZFSjob:
 
         if self._max_snapshots or self._max_snapshots == 0:
             self._limit_snapshots()
-        if self._max_backups or self._max_backups == 0:
+        if self._retention_policy:
+            self._limit_backups_by_retention()
+        elif self._max_backups or self._max_backups == 0:
             self._limit_backups()
 
         self._logger.info(f'filesystem={self._filesystem} msg="Finished job."')
@@ -541,6 +553,72 @@ class ZFSjob:
         backup_object.delete()
         self._backup_db.delete_backup(backup_time)
 
+    def _limit_backups_by_retention(self):
+        """ Limit S3 backups using a daily/weekly/monthly/yearly policy. """
+        backups = self._backup_db.get_backups()
+        retained, retention_categories = _select_retained_backups(
+            backups, self._retention_policy)
+
+        retained = self._add_retained_dependencies(backups, retained,
+                                                   retention_categories)
+
+        self._logger.info(
+            f'filesystem={self._filesystem} '
+            f'retention_policy={self._retention_policy} '
+            'msg="Applying backup retention policy."')
+
+        for backup in backups:
+            backup_time = backup.backup_time
+            categories = sorted(retention_categories.get(backup_time, []))
+            if backup_time in retained:
+                self._logger.info(
+                    f'filesystem={self._filesystem} '
+                    f'snapshot_name={backup_time} '
+                    f's3_key={backup.s3_key} '
+                    f'retention_categories="{",".join(categories)}" '
+                    'msg="Keeping backup."')
+            else:
+                self._logger.info(
+                    f'filesystem={self._filesystem} '
+                    f'snapshot_name={backup_time} '
+                    f's3_key={backup.s3_key} '
+                    'msg="Backup is outside retention policy."')
+
+        self._delete_backups_except(backups, retained)
+
+    def _add_retained_dependencies(self, backups, retained,
+                                   retention_categories):
+        """ Keep dependencies required by retained incremental backups. """
+        backups_by_time = {b.backup_time: b for b in backups}
+        retained = set(retained)
+
+        for backup in backups:
+            if backup.backup_time in retained and backup.dependency:
+                dependency = backups_by_time.get(backup.dependency)
+                if dependency:
+                    retained.add(dependency.backup_time)
+                    retention_categories.setdefault(
+                        dependency.backup_time, set()).add('dependency')
+
+        return retained
+
+    def _delete_backups_except(self, backups, retained):
+        """ Delete all backups not listed in retained.
+
+        Incremental backups are deleted before full backups so that a full
+        backup is never removed while a dependent incremental record remains.
+        """
+        for backup_type in ('inc', 'full'):
+            for backup in list(backups):
+                if (backup.backup_type == backup_type and
+                        backup.backup_time not in retained):
+                    self._logger.info(
+                        f'filesystem={self._filesystem} '
+                        f'snapshot_name={backup.backup_time} '
+                        f's3_key={backup.s3_key} '
+                        'msg="Deleting backup due to retention policy."')
+                    self._delete_backup(backup)
+
     def _limit_backups(self):
         """ Limit number of incremental and full backups.
 
@@ -627,3 +705,73 @@ def _get_transfer_config(send_size, max_multipart_parts):
     chunk_size = chunk_size if chunk_size > 8 * MB else 8 * MB
     return TransferConfig(max_concurrency=S3_MAX_CONCURRENCY,
                           multipart_chunksize=chunk_size)
+
+
+def _normalize_retention_policy(retention_policy):
+    if retention_policy is None:
+        return None
+
+    normalized = {}
+    for period in RETENTION_PERIODS:
+        value = retention_policy.get(period)
+        if value is None:
+            continue
+        if value < 0:
+            raise ValueError(f'retention {period} must be >= 0')
+        normalized[period] = value
+
+    return normalized or None
+
+
+def _select_retained_backups(backups, retention_policy):
+    """Select backups retained by daily/weekly/monthly/yearly policy.
+
+    Returns
+    -------
+    tuple(set(str), dict(str, set(str)))
+        Backup times to retain and their retention categories.
+    """
+    retained = set()
+    retention_categories = {}
+
+    for period in RETENTION_PERIODS:
+        limit = retention_policy.get(period)
+        if not limit:
+            continue
+
+        for backup in _select_period_backups(backups, period, limit):
+            retained.add(backup.backup_time)
+            retention_categories.setdefault(
+                backup.backup_time, set()).add(period)
+
+    return retained, retention_categories
+
+
+def _select_period_backups(backups, period, limit):
+    """Return the latest backup from the latest period buckets."""
+    buckets = {}
+    for backup in backups:
+        backup_datetime = datetime.strptime(backup.backup_time,
+                                            DATETIME_FORMAT)
+        period_key = _get_retention_period_key(backup_datetime, period)
+        current_backup = buckets.get(period_key)
+        if (current_backup is None or
+                backup.backup_time > current_backup.backup_time):
+            buckets[period_key] = backup
+
+    selected_periods = sorted(buckets.keys(), reverse=True)[:limit]
+    return [buckets[period_key] for period_key in selected_periods]
+
+
+def _get_retention_period_key(backup_datetime, period):
+    if period == 'daily':
+        return backup_datetime.date()
+    elif period == 'weekly':
+        calendar = backup_datetime.isocalendar()
+        return calendar[0], calendar[1]
+    elif period == 'monthly':
+        return backup_datetime.year, backup_datetime.month
+    elif period == 'yearly':
+        return backup_datetime.year
+    else:
+        raise ValueError(f'Unsupported retention period: {period}')
