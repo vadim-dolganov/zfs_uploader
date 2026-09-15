@@ -1,8 +1,9 @@
 import logging
 import unittest
+from configparser import ConfigParser
 
 from zfs_uploader.backup_db import Backup
-from zfs_uploader.config import _parse_retention_block
+from zfs_uploader.config import _create_retention_policy
 from zfs_uploader.job import ZFSjob, _select_retained_backups
 
 
@@ -13,20 +14,25 @@ def _backup(backup_time, backup_type='full', dependency=None):
 
 
 class RetentionSelectionTests(unittest.TestCase):
-    def test_parse_retention_block(self):
-        retention = """
-        daily: 14
-        weekly: 8
-        monthly: 12
-        yearly: 5
-        """
+    def test_create_retention_policy_from_ini_keys(self):
+        config = ConfigParser()
+        config.read_string("""
+        [DEFAULT]
+        retention_daily = 14
+        retention_weekly = 8
+
+        [pool/filesystem]
+        retention_monthly = 12
+        retention_yearly = 5
+        """)
 
         self.assertEqual({
             'daily': 14,
             'weekly': 8,
             'monthly': 12,
             'yearly': 5,
-        }, _parse_retention_block(retention))
+        }, _create_retention_policy(config['pool/filesystem'],
+                                    config['DEFAULT']))
 
     def test_selects_latest_backup_for_each_period(self):
         backups = [

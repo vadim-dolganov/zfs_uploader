@@ -133,11 +133,10 @@ storage_class = STANDARD
 cron = 0 2 * * *
 max_snapshots = 7
 max_incremental_backups_per_full = 6
-retention:
-  daily: 14
-  weekly: 8
-  monthly: 12
-  yearly: 5
+retention_daily = 14
+retention_weekly = 8
+retention_monthly = 12
+retention_yearly = 5
 ```
 
 The latest backup in each day, ISO week, month, and year is retained according
@@ -145,9 +144,6 @@ to the configured limits. A single S3 object can satisfy multiple retention
 periods. For example, the latest backup of a month may also count as the latest
 backup of the day and week. Incremental backup dependencies are preserved so
 that a retained incremental backup does not lose its required full backup.
-The same values can also be configured as flat INI keys:
-`retention_daily`, `retention_weekly`, `retention_monthly`, and
-`retention_yearly`.
 
 #### Backblaze B2 S3-compatible endpoint, full backups
 ```ini
